@@ -34,7 +34,9 @@ class RouteSegment {
   final String id;
   final Waypoint startCity;
   final Waypoint endCity;
-  
+  LatLng? customStartPosition;
+  LatLng? customEndPosition;
+
   LineStyle lineStyle;
   TransportMode transportMode;
   String? label;
@@ -77,4 +79,15 @@ class RouteSegment {
     this.showStartLabel = true,
     this.showEndLabel = true,
   });
+
+  LatLng get effectiveStartPosition =>
+      customStartPosition ?? startCity.position;
+  LatLng get effectiveEndPosition => customEndPosition ?? endCity.position;
+  bool get hasCustomMarkerPosition =>
+      customStartPosition != null || customEndPosition != null;
+
+  void resetMarkerPositions() {
+    customStartPosition = null;
+    customEndPosition = null;
+  }
 }

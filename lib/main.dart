@@ -1,5 +1,7 @@
 import 'dart:math';
+import 'dart:convert';
 import 'dart:ui' as ui;
+import 'package:flutter/services.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
@@ -7,7 +9,6 @@ import 'package:latlong2/latlong.dart';
 import 'dart:html' as html;
 import 'dart:typed_data';
 
-import 'vietnam_border.dart';
 import 'vietnam_cities.dart';
 import 'route_segment.dart';
 
@@ -20,7 +21,10 @@ class MyApp extends StatelessWidget {
     return MaterialApp(
       title: 'Minimal Travel Map',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(colorSchemeSeed: const Color(0xFF16A34A), useMaterial3: true, fontFamily: 'Segoe UI'),
+      theme: ThemeData(
+          colorSchemeSeed: const Color(0xFF16A34A),
+          useMaterial3: true,
+          fontFamily: 'Segoe UI'),
       home: const HomePage(),
     );
   }
@@ -32,21 +36,77 @@ class HomePage extends StatefulWidget {
   State<HomePage> createState() => _HomePageState();
 }
 
+class MapImageOverlay {
+  MapImageOverlay({
+    required this.id,
+    required this.bytes,
+    this.position = const Offset(80, 80),
+    this.size = const Size(220, 120),
+  });
+
+  final String id;
+  final Uint8List bytes;
+  Offset position;
+  Size size;
+}
+
+class MapTextOverlay {
+  MapTextOverlay({
+    required this.id,
+    required this.text,
+    this.position = const Offset(100, 100),
+    this.size = const Size(240, 80),
+  });
+
+  final String id;
+  String text;
+  Offset position;
+  Size size;
+}
+
+class CountryBoundary {
+  const CountryBoundary({
+    required this.name,
+    required this.code,
+    required this.rings,
+  });
+
+  final String name;
+  final String code;
+  final List<List<LatLng>> rings;
+}
+
 class _HomePageState extends State<HomePage> {
   final MapController _mapController = MapController();
-  final GlobalKey _mapKey = GlobalKey(); 
-  final GlobalKey _boundaryKey = GlobalKey(); 
+  final GlobalKey _mapKey = GlobalKey();
+  final GlobalKey _boundaryKey = GlobalKey();
 
   final List<RouteSegment> _routes = [];
+  final List<MapImageOverlay> _imageOverlays = [];
+  final List<MapTextOverlay> _textOverlays = [];
+  List<CountryBoundary> _countryBoundaries = [];
+  List<List<LatLng>> _disputedIslandRings = [];
   int _expandedRouteIndex = -1;
   int _idCounter = 0;
+  int _overlayIdCounter = 0;
 
   // Legend State
   bool _showLegend = true;
   Offset _legendPos = const Offset(20, 20);
   double _legendScale = 1.0;
+  Set<TransportMode> _legendTransportModes = {};
+  String? _activeOverlayId;
 
-  final List<Color> _presetColors = const [Colors.blue, Colors.red, Colors.black, Colors.green, Colors.orange, Colors.purple, Colors.teal, Colors.pink];
+  final List<Color> _presetColors = const [
+    Colors.blue,
+    Colors.red,
+    Colors.black,
+    Colors.green,
+    Colors.orange,
+    Colors.purple,
+    Colors.teal,
+    Colors.pink
+  ];
 
   static const Color colorOutgoing = Color(0xFF16A34A); // Green
   static const Color colorReturn = Color(0xFFDB2777); // Pink
@@ -60,20 +120,100 @@ class _HomePageState extends State<HomePage> {
   List<String> _endSuggestions = [];
   String? _errorMessage;
 
+  @override
+  void initState() {
+    super.initState();
+    _loadGeoJsonBoundaries();
+  }
+
+  Future<void> _loadGeoJsonBoundaries() async {
+    final countries = await _loadCountryBoundaries(
+      'assets/geojson/indochina_admin0.geojson',
+    );
+    final islands = await _loadGeoJsonRings(
+      'assets/geojson/south_china_sea_islands.geojson',
+    );
+    if (!mounted) return;
+    setState(() {
+      _countryBoundaries = countries;
+      _disputedIslandRings = islands;
+    });
+  }
+
+  Future<List<CountryBoundary>> _loadCountryBoundaries(String assetPath) async {
+    final raw = await rootBundle.loadString(assetPath);
+    final data = jsonDecode(raw) as Map<String, dynamic>;
+    final features = data['features'] as List<dynamic>;
+
+    return features.map((feature) {
+      final featureMap = feature as Map<String, dynamic>;
+      final properties = featureMap['properties'] as Map<String, dynamic>;
+      final name = properties['NAME'] as String? ?? '';
+      final code = properties['ADM0_A3'] as String? ??
+          properties['ISO_A3'] as String? ??
+          '';
+      final rings = _extractGeoJsonRings(
+        featureMap['geometry'] as Map<String, dynamic>,
+      );
+      return CountryBoundary(name: name, code: code, rings: rings);
+    }).toList();
+  }
+
+  Future<List<List<LatLng>>> _loadGeoJsonRings(String assetPath) async {
+    final raw = await rootBundle.loadString(assetPath);
+    final data = jsonDecode(raw) as Map<String, dynamic>;
+    final features = data['features'] as List<dynamic>;
+    return features
+        .expand((feature) => _extractGeoJsonRings(
+              (feature as Map<String, dynamic>)['geometry']
+                  as Map<String, dynamic>,
+            ))
+        .toList();
+  }
+
+  List<List<LatLng>> _extractGeoJsonRings(Map<String, dynamic> geometry) {
+    final type = geometry['type'] as String;
+    final coordinates = geometry['coordinates'] as List<dynamic>;
+
+    if (type == 'Polygon') {
+      return [_parseLinearRing(coordinates.first as List<dynamic>)];
+    }
+    if (type == 'MultiPolygon') {
+      return coordinates
+          .map((polygon) =>
+              _parseLinearRing((polygon as List<dynamic>).first as List))
+          .toList();
+    }
+    return [];
+  }
+
+  List<LatLng> _parseLinearRing(List<dynamic> ring) {
+    return ring.map((point) {
+      final coord = point as List<dynamic>;
+      final longitude = (coord[0] as num).toDouble();
+      final latitude = (coord[1] as num).toDouble();
+      return LatLng(latitude, longitude);
+    }).toList();
+  }
+
   void _onStartChanged(String value) {
     final q = value.trim().toLowerCase();
-    setState(() => _startSuggestions = q.isEmpty ? [] : vietnamCities.keys.where((c) => c.contains(q)).take(4).toList());
+    setState(() => _startSuggestions = q.isEmpty
+        ? []
+        : vietnamCities.keys.where((c) => c.contains(q)).take(4).toList());
   }
 
   void _onEndChanged(String value) {
     final q = value.trim().toLowerCase();
-    setState(() => _endSuggestions = q.isEmpty ? [] : vietnamCities.keys.where((c) => c.contains(q)).take(4).toList());
+    setState(() => _endSuggestions = q.isEmpty
+        ? []
+        : vietnamCities.keys.where((c) => c.contains(q)).take(4).toList());
   }
 
   void _addRoute() {
     final sName = _startCtrl.text.trim().toLowerCase();
     final eName = _endCtrl.text.trim().toLowerCase();
-    
+
     if (sName.isEmpty || eName.isEmpty) {
       setState(() => _errorMessage = 'Vui lòng nhập cả điểm đi và điểm đến');
       return;
@@ -82,9 +222,18 @@ class _HomePageState extends State<HomePage> {
     final sPos = vietnamCities[sName];
     final ePos = vietnamCities[eName];
 
-    if (sPos == null) { setState(() => _errorMessage = 'Không tìm thấy "${_startCtrl.text}"'); return; }
-    if (ePos == null) { setState(() => _errorMessage = 'Không tìm thấy "${_endCtrl.text}"'); return; }
-    if (sName == eName) { setState(() => _errorMessage = 'Điểm đi và đến trùng nhau!'); return; }
+    if (sPos == null) {
+      setState(() => _errorMessage = 'Không tìm thấy "${_startCtrl.text}"');
+      return;
+    }
+    if (ePos == null) {
+      setState(() => _errorMessage = 'Không tìm thấy "${_endCtrl.text}"');
+      return;
+    }
+    if (sName == eName) {
+      setState(() => _errorMessage = 'Điểm đi và đến trùng nhau!');
+      return;
+    }
 
     _idCounter++;
     setState(() {
@@ -100,7 +249,7 @@ class _HomePageState extends State<HomePage> {
       _endSuggestions.clear();
       _expandedRouteIndex = _routes.length - 1; // Auto expand the new route
     });
-    
+
     _fitMapToRoutes();
   }
 
@@ -112,32 +261,113 @@ class _HomePageState extends State<HomePage> {
     _fitMapToRoutes();
   }
 
-  List<Waypoint> _getUniqueWaypoints() {
-    final Map<String, Waypoint> unique = {};
+  List<LatLng> _getUniqueWaypointPositions() {
+    final Map<String, LatLng> unique = {};
     for (var r in _routes) {
-      unique[r.startCity.name] = r.startCity;
-      unique[r.endCity.name] = r.endCity;
+      unique[r.startCity.name] = r.effectiveStartPosition;
+      unique[r.endCity.name] = r.effectiveEndPosition;
     }
     return unique.values.toList();
   }
 
   void _fitMapToRoutes() {
-    final points = _getUniqueWaypoints().map((w) => w.position).toList();
+    final points = _getUniqueWaypointPositions();
     if (points.isEmpty) return;
-    if (points.length == 1) { _mapController.move(points.first, 8); return; }
+    if (points.length == 1) {
+      _mapController.move(points.first, 8);
+      return;
+    }
     _mapController.fitBounds(
       LatLngBounds.fromPoints(points),
       options: const FitBoundsOptions(padding: EdgeInsets.all(80), maxZoom: 10),
     );
   }
 
-  String _capitalize(String s) => s.split(' ').map((w) => w.isEmpty ? w : w[0].toUpperCase() + w.substring(1)).join(' ');
+  String _capitalize(String s) => s
+      .split(' ')
+      .map((w) => w.isEmpty ? w : w[0].toUpperCase() + w.substring(1))
+      .join(' ');
+
+  Future<void> _insertImageOverlay() async {
+    final input = html.FileUploadInputElement()..accept = 'image/*';
+    input.click();
+    await input.onChange.first;
+    final file = input.files?.isNotEmpty == true ? input.files!.first : null;
+    if (file == null) return;
+
+    final reader = html.FileReader();
+    reader.readAsArrayBuffer(file);
+    await reader.onLoad.first;
+    final result = reader.result;
+    final bytes = result is ByteBuffer
+        ? Uint8List.view(result)
+        : Uint8List.fromList(result as List<int>);
+
+    setState(() {
+      _overlayIdCounter++;
+      _imageOverlays.add(MapImageOverlay(
+        id: 'image-$_overlayIdCounter',
+        bytes: bytes,
+      ));
+    });
+  }
+
+  Future<void> _insertTextOverlay() async {
+    final controller = TextEditingController();
+    final text = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Thêm chữ lên bản đồ'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          maxLines: 3,
+          decoration: const InputDecoration(
+            hintText: 'Nhập nội dung...',
+            border: OutlineInputBorder(),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Hủy'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(controller.text.trim()),
+            child: const Text('Thêm'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (text == null || text.isEmpty) return;
+
+    setState(() {
+      _overlayIdCounter++;
+      _textOverlays.add(MapTextOverlay(
+        id: 'text-$_overlayIdCounter',
+        text: text,
+      ));
+    });
+  }
+
+  void _generateLegend() {
+    setState(() {
+      _legendTransportModes = _routes
+          .map((route) => route.transportMode)
+          .where((mode) => mode != TransportMode.none)
+          .toSet();
+      _showLegend = true;
+    });
+  }
 
   Future<void> _exportMap() async {
     try {
-      RenderRepaintBoundary boundary = _boundaryKey.currentContext!.findRenderObject() as RenderRepaintBoundary;
+      RenderRepaintBoundary boundary = _boundaryKey.currentContext!
+          .findRenderObject() as RenderRepaintBoundary;
       ui.Image image = await boundary.toImage(pixelRatio: 3.0);
-      ByteData? byteData = await image.toByteData(format: ui.ImageByteFormat.png);
+      ByteData? byteData =
+          await image.toByteData(format: ui.ImageByteFormat.png);
       if (byteData != null) {
         final Uint8List pngBytes = byteData.buffer.asUint8List();
         final blob = html.Blob([pngBytes]);
@@ -153,10 +383,12 @@ class _HomePageState extends State<HomePage> {
   }
 
   @override
-  void dispose() { 
-    _startCtrl.dispose(); _endCtrl.dispose();
-    _startFocus.dispose(); _endFocus.dispose();
-    super.dispose(); 
+  void dispose() {
+    _startCtrl.dispose();
+    _endCtrl.dispose();
+    _startFocus.dispose();
+    _endFocus.dispose();
+    super.dispose();
   }
 
   @override
@@ -170,6 +402,8 @@ class _HomePageState extends State<HomePage> {
             child: Stack(
               children: [
                 _buildMap(),
+                ..._imageOverlays.map(_buildImageOverlay),
+                ..._textOverlays.map(_buildTextOverlay),
                 if (_showLegend) _buildLegend(),
               ],
             ),
@@ -185,7 +419,10 @@ class _HomePageState extends State<HomePage> {
   Widget _buildControlPanel() {
     return Container(
       decoration: BoxDecoration(color: Colors.white, boxShadow: [
-        BoxShadow(color: Colors.black.withOpacity(0.08), blurRadius: 12, offset: const Offset(2, 0)),
+        BoxShadow(
+            color: Colors.black.withOpacity(0.08),
+            blurRadius: 12,
+            offset: const Offset(2, 0)),
       ]),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Padding(
@@ -193,7 +430,11 @@ class _HomePageState extends State<HomePage> {
           child: Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Text('Lịch trình của bạn', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700, color: Colors.grey.shade800)),
+              Text('Lịch trình của bạn',
+                  style: TextStyle(
+                      fontSize: 20,
+                      fontWeight: FontWeight.w700,
+                      color: Colors.grey.shade800)),
               IconButton(
                 tooltip: 'Xuất ảnh bản đồ',
                 icon: const Icon(Icons.download, color: colorOutgoing),
@@ -202,14 +443,56 @@ class _HomePageState extends State<HomePage> {
             ],
           ),
         ),
-        
+
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 0),
-          child: Row(
+          child: Column(
             children: [
-              Text("Hiển thị chú thích", style: TextStyle(fontSize: 14, color: Colors.grey.shade700)),
-              const Spacer(),
-              Switch(value: _showLegend, onChanged: (v) => setState(() => _showLegend = v), activeColor: colorOutgoing)
+              Row(
+                children: [
+                  Text("Hiển thị chú thích",
+                      style:
+                          TextStyle(fontSize: 14, color: Colors.grey.shade700)),
+                  const Spacer(),
+                  Switch(
+                      value: _showLegend,
+                      onChanged: (v) => setState(() => _showLegend = v),
+                      activeColor: colorOutgoing)
+                ],
+              ),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: _insertImageOverlay,
+                      icon: const Icon(Icons.image_outlined, size: 18),
+                      label: const Text('Chèn ảnh'),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: _insertTextOverlay,
+                      icon: const Icon(Icons.text_fields, size: 18),
+                      label: const Text('Chèn text'),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton.icon(
+                  onPressed: _generateLegend,
+                  icon: const Icon(Icons.auto_awesome_motion, size: 18),
+                  label: const Text('Generate chú thích'),
+                  style: FilledButton.styleFrom(
+                    backgroundColor: colorOutgoing,
+                    foregroundColor: Colors.white,
+                  ),
+                ),
+              ),
             ],
           ),
         ),
@@ -230,34 +513,47 @@ class _HomePageState extends State<HomePage> {
               children: [
                 // Start Input
                 _buildInputRow(
-                  icon: Icons.trip_origin, iconColor: Colors.blue,
-                  hint: 'Điểm xuất phát...', ctrl: _startCtrl, focus: _startFocus,
-                  onChanged: _onStartChanged,
-                  suggestions: _startSuggestions,
-                  onSelect: (city) {
-                    setState(() { _startCtrl.text = _capitalize(city); _startSuggestions.clear(); });
-                    _endFocus.requestFocus();
-                  }
-                ),
+                    icon: Icons.trip_origin,
+                    iconColor: Colors.blue,
+                    hint: 'Điểm xuất phát...',
+                    ctrl: _startCtrl,
+                    focus: _startFocus,
+                    onChanged: _onStartChanged,
+                    suggestions: _startSuggestions,
+                    onSelect: (city) {
+                      setState(() {
+                        _startCtrl.text = _capitalize(city);
+                        _startSuggestions.clear();
+                      });
+                      _endFocus.requestFocus();
+                    }),
                 const Padding(
                   padding: EdgeInsets.only(left: 7, top: 4, bottom: 4),
                   child: Icon(Icons.more_vert, size: 16, color: Colors.black38),
                 ),
                 // End Input
                 _buildInputRow(
-                  icon: Icons.location_on, iconColor: Colors.red,
-                  hint: 'Điểm đến...', ctrl: _endCtrl, focus: _endFocus,
-                  onChanged: _onEndChanged,
-                  suggestions: _endSuggestions,
-                  onSelect: (city) {
-                    setState(() { _endCtrl.text = _capitalize(city); _endSuggestions.clear(); });
-                    _addRoute();
-                  }
-                ),
-                
+                    icon: Icons.location_on,
+                    iconColor: Colors.red,
+                    hint: 'Điểm đến...',
+                    ctrl: _endCtrl,
+                    focus: _endFocus,
+                    onChanged: _onEndChanged,
+                    suggestions: _endSuggestions,
+                    onSelect: (city) {
+                      setState(() {
+                        _endCtrl.text = _capitalize(city);
+                        _endSuggestions.clear();
+                      });
+                      _addRoute();
+                    }),
+
                 if (_errorMessage != null)
-                  Padding(padding: const EdgeInsets.only(top: 8),
-                    child: Text(_errorMessage!, style: const TextStyle(color: Color(0xFFDC2626), fontSize: 12))),
+                  Padding(
+                      padding: const EdgeInsets.only(top: 8),
+                      child: Text(_errorMessage!,
+                          style: const TextStyle(
+                              color: Color(0xFFDC2626), fontSize: 12))),
 
                 const SizedBox(height: 12),
                 SizedBox(
@@ -267,10 +563,12 @@ class _HomePageState extends State<HomePage> {
                     icon: const Icon(Icons.add, size: 18),
                     label: const Text('Thêm tuyến đường'),
                     style: ElevatedButton.styleFrom(
-                      backgroundColor: colorOutgoing, foregroundColor: Colors.white,
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                      padding: const EdgeInsets.symmetric(vertical: 10), elevation: 0
-                    ),
+                        backgroundColor: colorOutgoing,
+                        foregroundColor: Colors.white,
+                        shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(8)),
+                        padding: const EdgeInsets.symmetric(vertical: 10),
+                        elevation: 0),
                   ),
                 ),
               ],
@@ -284,35 +582,66 @@ class _HomePageState extends State<HomePage> {
         // --- Scrollable Route Cards ---
         Expanded(
           child: _routes.isEmpty
-            ? Center(child: Padding(padding: const EdgeInsets.all(32), child: Column(mainAxisSize: MainAxisSize.min, children: [
-                Icon(Icons.map_outlined, size: 48, color: Colors.grey.shade300), const SizedBox(height: 12),
-                Text('Tạo tuyến đường\nđể bắt đầu hiển thị bản đồ', textAlign: TextAlign.center,
-                  style: TextStyle(fontSize: 14, color: Colors.grey.shade400)),
-              ])))
-            : ListView(padding: const EdgeInsets.only(top: 8, bottom: 8), children: [
-                Padding(padding: const EdgeInsets.fromLTRB(20, 8, 20, 8),
-                  child: Text('Danh sách tuyến đường', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: Colors.grey.shade700))),
-                ..._routes.asMap().entries.map((e) => _buildRouteCard(e.key)),
-              ]),
+              ? Center(
+                  child: Padding(
+                      padding: const EdgeInsets.all(32),
+                      child: Column(mainAxisSize: MainAxisSize.min, children: [
+                        Icon(Icons.map_outlined,
+                            size: 48, color: Colors.grey.shade300),
+                        const SizedBox(height: 12),
+                        Text('Tạo tuyến đường\nđể bắt đầu hiển thị bản đồ',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                                fontSize: 14, color: Colors.grey.shade400)),
+                      ])))
+              : ListView(
+                  padding: const EdgeInsets.only(top: 8, bottom: 8),
+                  children: [
+                      Padding(
+                          padding: const EdgeInsets.fromLTRB(20, 8, 20, 8),
+                          child: Text('Danh sách tuyến đường',
+                              style: TextStyle(
+                                  fontSize: 15,
+                                  fontWeight: FontWeight.w700,
+                                  color: Colors.grey.shade700))),
+                      ..._routes
+                          .asMap()
+                          .entries
+                          .map((e) => _buildRouteCard(e.key)),
+                    ]),
         ),
 
         if (_routes.isNotEmpty)
-          Padding(padding: const EdgeInsets.fromLTRB(16, 0, 16, 16), child: SizedBox(width: double.infinity,
-            child: OutlinedButton.icon(
-              onPressed: () => setState(() { _routes.clear(); _expandedRouteIndex = -1; }),
-              icon: const Icon(Icons.delete_outline, size: 18), label: const Text('Xóa tất cả'),
-              style: OutlinedButton.styleFrom(foregroundColor: const Color(0xFFDC2626),
-                side: const BorderSide(color: Color(0xFFFCA5A5)), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))),
-            ),
-          )),
+          Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+              child: SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  onPressed: () => setState(() {
+                    _routes.clear();
+                    _expandedRouteIndex = -1;
+                  }),
+                  icon: const Icon(Icons.delete_outline, size: 18),
+                  label: const Text('Xóa tất cả'),
+                  style: OutlinedButton.styleFrom(
+                      foregroundColor: const Color(0xFFDC2626),
+                      side: const BorderSide(color: Color(0xFFFCA5A5)),
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(10))),
+                ),
+              )),
       ]),
     );
   }
 
   Widget _buildInputRow({
-    required IconData icon, required Color iconColor, required String hint,
-    required TextEditingController ctrl, required FocusNode focus,
-    required Function(String) onChanged, required List<String> suggestions,
+    required IconData icon,
+    required Color iconColor,
+    required String hint,
+    required TextEditingController ctrl,
+    required FocusNode focus,
+    required Function(String) onChanged,
+    required List<String> suggestions,
     required Function(String) onSelect,
   }) {
     return Column(
@@ -323,15 +652,28 @@ class _HomePageState extends State<HomePage> {
           const SizedBox(width: 8),
           Expanded(
             child: TextField(
-              controller: ctrl, focusNode: focus, onChanged: onChanged,
+              controller: ctrl,
+              focusNode: focus,
+              onChanged: onChanged,
               onSubmitted: (_) => _addRoute(),
               decoration: InputDecoration(
-                hintText: hint, hintStyle: TextStyle(color: Colors.grey.shade400, fontSize: 13),
-                filled: true, fillColor: Colors.white, isDense: true,
-                contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
-                border: OutlineInputBorder(borderRadius: BorderRadius.circular(6), borderSide: BorderSide(color: Colors.grey.shade300)),
-                enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(6), borderSide: BorderSide(color: Colors.grey.shade300)),
-                focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(6), borderSide: const BorderSide(color: colorOutgoing, width: 1.5)),
+                hintText: hint,
+                hintStyle: TextStyle(color: Colors.grey.shade400, fontSize: 13),
+                filled: true,
+                fillColor: Colors.white,
+                isDense: true,
+                contentPadding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+                border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(6),
+                    borderSide: BorderSide(color: Colors.grey.shade300)),
+                enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(6),
+                    borderSide: BorderSide(color: Colors.grey.shade300)),
+                focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(6),
+                    borderSide:
+                        const BorderSide(color: colorOutgoing, width: 1.5)),
               ),
               style: const TextStyle(fontSize: 13),
             ),
@@ -340,67 +682,106 @@ class _HomePageState extends State<HomePage> {
         if (suggestions.isNotEmpty)
           Container(
             margin: const EdgeInsets.only(top: 6, left: 26),
-            decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(6),
-              border: Border.all(color: Colors.grey.shade200),
-              boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 4, offset: Offset(0, 2))]),
+            decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(6),
+                border: Border.all(color: Colors.grey.shade200),
+                boxShadow: const [
+                  BoxShadow(
+                      color: Colors.black12,
+                      blurRadius: 4,
+                      offset: Offset(0, 2))
+                ]),
             child: Column(
               mainAxisSize: MainAxisSize.min,
-              children: suggestions.map((city) => InkWell(
-                onTap: () => onSelect(city),
-                child: Padding(padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                  child: Row(children: [
-                    Icon(Icons.place, size: 14, color: Colors.grey.shade500), const SizedBox(width: 8),
-                    Text(_capitalize(city), style: const TextStyle(fontSize: 13))
-                  ])),
-              )).toList(),
+              children: suggestions
+                  .map((city) => InkWell(
+                        onTap: () => onSelect(city),
+                        child: Padding(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 12, vertical: 10),
+                            child: Row(children: [
+                              Icon(Icons.place,
+                                  size: 14, color: Colors.grey.shade500),
+                              const SizedBox(width: 8),
+                              Text(_capitalize(city),
+                                  style: const TextStyle(fontSize: 13))
+                            ])),
+                      ))
+                  .toList(),
             ),
           ),
       ],
     );
   }
 
-  Widget _colorPickerBtn(String label, Color currentColor, Function(Color) onSelect) {
+  Widget _colorPickerBtn(
+      String label, Color currentColor, Function(Color) onSelect) {
     return Column(
       children: [
-        Text(label, style: const TextStyle(fontSize: 11, color: Colors.black54)),
+        Text(label,
+            style: const TextStyle(fontSize: 11, color: Colors.black54)),
         const SizedBox(height: 4),
         PopupMenuButton<Color>(
           onSelected: onSelect,
           tooltip: 'Đổi màu',
-          itemBuilder: (context) => _presetColors.map((c) => PopupMenuItem(
-            value: c,
-            child: Container(width: 24, height: 24, color: c, margin: const EdgeInsets.only(bottom: 4)),
-          )).toList(),
+          itemBuilder: (context) => _presetColors
+              .map((c) => PopupMenuItem(
+                    value: c,
+                    child: Container(
+                        width: 24,
+                        height: 24,
+                        color: c,
+                        margin: const EdgeInsets.only(bottom: 4)),
+                  ))
+              .toList(),
           child: Container(
-            width: 26, height: 26,
-            decoration: BoxDecoration(color: currentColor, shape: BoxShape.circle, border: Border.all(color: Colors.grey.shade400)),
+            width: 26,
+            height: 26,
+            decoration: BoxDecoration(
+                color: currentColor,
+                shape: BoxShape.circle,
+                border: Border.all(color: Colors.grey.shade400)),
           ),
         ),
       ],
     );
   }
 
-  Widget _posPickerBtn(String label, String currentPos, Function(String) onSelect) {
+  Widget _posPickerBtn(
+      String label, String currentPos, Function(String) onSelect) {
     IconData getIcon(String pos) {
       if (pos == 'top') return Icons.arrow_upward;
       if (pos == 'bottom') return Icons.arrow_downward;
       if (pos == 'left') return Icons.arrow_back;
       return Icons.arrow_forward;
     }
+
     return Column(
       children: [
-        Text(label, style: const TextStyle(fontSize: 11, color: Colors.black54)),
+        Text(label,
+            style: const TextStyle(fontSize: 11, color: Colors.black54)),
         const SizedBox(height: 4),
         PopupMenuButton<String>(
           onSelected: onSelect,
           tooltip: 'Chọn vị trí',
-          itemBuilder: (context) => ['top', 'bottom', 'left', 'right'].map((p) => PopupMenuItem(
-            value: p,
-            child: Row(children: [Icon(getIcon(p), size: 16), const SizedBox(width: 8), Text(p.toUpperCase())]),
-          )).toList(),
+          itemBuilder: (context) => ['top', 'bottom', 'left', 'right']
+              .map((p) => PopupMenuItem(
+                    value: p,
+                    child: Row(children: [
+                      Icon(getIcon(p), size: 16),
+                      const SizedBox(width: 8),
+                      Text(p.toUpperCase())
+                    ]),
+                  ))
+              .toList(),
           child: Container(
-            width: 26, height: 26,
-            decoration: BoxDecoration(color: Colors.grey.shade100, borderRadius: BorderRadius.circular(4), border: Border.all(color: Colors.grey.shade300)),
+            width: 26,
+            height: 26,
+            decoration: BoxDecoration(
+                color: Colors.grey.shade100,
+                borderRadius: BorderRadius.circular(4),
+                border: Border.all(color: Colors.grey.shade300)),
             child: Icon(getIcon(currentPos), size: 16, color: Colors.black87),
           ),
         ),
@@ -417,215 +798,536 @@ class _HomePageState extends State<HomePage> {
 
     return Card(
       margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10),
-        side: BorderSide(color: isExpanded ? colorOutgoing : Colors.grey.shade200)),
+      shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(10),
+          side: BorderSide(
+              color: isExpanded ? colorOutgoing : Colors.grey.shade200)),
       elevation: isExpanded ? 2 : 0,
       child: Column(children: [
         InkWell(
           borderRadius: BorderRadius.circular(10),
-          onTap: () => setState(() => _expandedRouteIndex = isExpanded ? -1 : index),
-          child: Padding(padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-            child: Row(children: [
-              Container(width: 12, height: 12, decoration: const BoxDecoration(color: colorOutgoing, shape: BoxShape.circle)),
-              const SizedBox(width: 10),
-              Expanded(child: Text('${seg.startCity.name} ➔ ${seg.endCity.name}', 
-                style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600), overflow: TextOverflow.ellipsis)),
-              
-              // Nút xóa tuyến
-              IconButton(
-                padding: EdgeInsets.zero, constraints: const BoxConstraints(),
-                icon: Icon(Icons.close, size: 16, color: Colors.grey.shade400),
-                onPressed: () => _removeRoute(index),
-              ),
-              const SizedBox(width: 8),
-              Icon(isExpanded ? Icons.expand_less : Icons.expand_more, size: 20, color: Colors.grey.shade500),
-            ])),
-        ),
-        if (isExpanded) Padding(
-          padding: const EdgeInsets.fromLTRB(14, 0, 14, 14),
-          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            const Divider(height: 1),
-            const SizedBox(height: 10),
-            
-            // Return Route Toggle
-            Row(
-              children: [
-                Text('Thêm tuyến về (màu hồng)', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Colors.grey.shade700)),
-                const Spacer(),
-                Switch(
-                  value: seg.hasReturnRoute,
-                  onChanged: (v) => setState(() => seg.hasReturnRoute = v),
-                  activeColor: colorReturn,
-                ),
-              ],
-            ),
-            const SizedBox(height: 6),
+          onTap: () =>
+              setState(() => _expandedRouteIndex = isExpanded ? -1 : index),
+          child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+              child: Row(children: [
+                Container(
+                    width: 12,
+                    height: 12,
+                    decoration: const BoxDecoration(
+                        color: colorOutgoing, shape: BoxShape.circle)),
+                const SizedBox(width: 10),
+                Expanded(
+                    child: Text('${seg.startCity.name} ➔ ${seg.endCity.name}',
+                        style: const TextStyle(
+                            fontSize: 13, fontWeight: FontWeight.w600),
+                        overflow: TextOverflow.ellipsis)),
 
-            // Line style
-            Text('Kiểu nét', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Colors.grey.shade600)),
-            const SizedBox(height: 6),
-            Row(children: [
-              _styleButton('Nét liền', seg.lineStyle == LineStyle.solid, () => setState(() => seg.lineStyle = LineStyle.solid)),
-              const SizedBox(width: 8),
-              _styleButton('Nét đứt', seg.lineStyle == LineStyle.dashed, () => setState(() => seg.lineStyle = LineStyle.dashed)),
+                // Nút xóa tuyến
+                IconButton(
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(),
+                  icon:
+                      Icon(Icons.close, size: 16, color: Colors.grey.shade400),
+                  onPressed: () => _removeRoute(index),
+                ),
+                const SizedBox(width: 8),
+                Icon(isExpanded ? Icons.expand_less : Icons.expand_more,
+                    size: 20, color: Colors.grey.shade500),
+              ])),
+        ),
+        if (isExpanded)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(14, 0, 14, 14),
+            child:
+                Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              const Divider(height: 1),
+              const SizedBox(height: 10),
+
+              // Return Route Toggle
+              Row(
+                children: [
+                  Text('Thêm tuyến về (màu hồng)',
+                      style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                          color: Colors.grey.shade700)),
+                  const Spacer(),
+                  Switch(
+                    value: seg.hasReturnRoute,
+                    onChanged: (v) => setState(() => seg.hasReturnRoute = v),
+                    activeColor: colorReturn,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 6),
+
+              // Line style
+              Text('Kiểu nét',
+                  style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      color: Colors.grey.shade600)),
+              const SizedBox(height: 6),
+              Row(children: [
+                _styleButton('Nét liền', seg.lineStyle == LineStyle.solid,
+                    () => setState(() => seg.lineStyle = LineStyle.solid)),
+                const SizedBox(width: 8),
+                _styleButton('Nét đứt', seg.lineStyle == LineStyle.dashed,
+                    () => setState(() => seg.lineStyle = LineStyle.dashed)),
+              ]),
+              const SizedBox(height: 12),
+              // Label
+              Text('Ghi chú',
+                  style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      color: Colors.grey.shade600)),
+              const SizedBox(height: 6),
+              TextField(
+                controller: TextEditingController(text: seg.label ?? ''),
+                onChanged: (v) => seg.label = v.isEmpty ? null : v,
+                decoration: InputDecoration(
+                  hintText: 'VD: 1h30 bay',
+                  hintStyle:
+                      TextStyle(color: Colors.grey.shade400, fontSize: 13),
+                  filled: true,
+                  fillColor: const Color(0xFFF9FAFB),
+                  isDense: true,
+                  contentPadding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                  border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(8),
+                      borderSide: BorderSide(color: Colors.grey.shade300)),
+                  enabledBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(8),
+                      borderSide: BorderSide(color: Colors.grey.shade300)),
+                ),
+                style: const TextStyle(fontSize: 13),
+              ),
+              const SizedBox(height: 6),
+              Row(
+                children: [
+                  _formatButton('B', Icons.format_bold, seg.isLabelBold,
+                      () => setState(() => seg.isLabelBold = !seg.isLabelBold)),
+                  const SizedBox(width: 8),
+                  _formatButton(
+                      'I',
+                      Icons.format_italic,
+                      seg.isLabelItalic,
+                      () => setState(
+                          () => seg.isLabelItalic = !seg.isLabelItalic)),
+                ],
+              ),
+              const SizedBox(height: 12),
+              // Transport icon
+              Text('Phương tiện',
+                  style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      color: Colors.grey.shade600)),
+              const SizedBox(height: 6),
+              Wrap(
+                  spacing: 6,
+                  children: TransportMode.values
+                      .where((m) => m != TransportMode.none)
+                      .map((mode) {
+                    final isActive = seg.transportMode == mode;
+                    return GestureDetector(
+                      onTap: () => setState(() => seg.transportMode =
+                          isActive ? TransportMode.none : mode),
+                      child: Container(
+                          width: 36,
+                          height: 36,
+                          decoration: BoxDecoration(
+                              color: isActive
+                                  ? colorOutgoing.withOpacity(0.15)
+                                  : Colors.grey.shade100,
+                              borderRadius: BorderRadius.circular(8),
+                              border: isActive
+                                  ? Border.all(color: colorOutgoing, width: 2)
+                                  : null),
+                          child: Icon(transportIconData(mode),
+                              size: 18,
+                              color: isActive
+                                  ? colorOutgoing
+                                  : Colors.grey.shade500)),
+                    );
+                  }).toList()),
+              const SizedBox(height: 12),
+              // Sliders for Position and Sizes
+              Text('Vị trí ghi chú',
+                  style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      color: Colors.grey.shade600)),
+              Slider(
+                value: seg.labelPosition,
+                min: 0.05,
+                max: 0.95,
+                activeColor: colorOutgoing,
+                onChanged: (v) => setState(() => seg.labelPosition = v),
+              ),
+
+              Text('Cỡ chữ',
+                  style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      color: Colors.grey.shade600)),
+              Slider(
+                value: seg.labelSize,
+                min: 8.0,
+                max: 24.0,
+                divisions: 16,
+                activeColor: colorOutgoing,
+                onChanged: (v) => setState(() => seg.labelSize = v),
+              ),
+
+              Text('Cỡ Icon',
+                  style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      color: Colors.grey.shade600)),
+              Slider(
+                value: seg.iconSize,
+                min: 14.0,
+                max: 36.0,
+                divisions: 22,
+                activeColor: colorOutgoing,
+                onChanged: (v) => setState(() => seg.iconSize = v),
+              ),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  const Text('Đảo vị trí Icon/Chữ',
+                      style: TextStyle(fontSize: 12)),
+                  Switch(
+                    value: seg.swapLabelIcon,
+                    onChanged: (v) => setState(() => seg.swapLabelIcon = v),
+                    activeColor: colorOutgoing,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Text('Tùy chỉnh Điểm dừng (Marker)',
+                  style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      color: Colors.grey.shade600)),
+              Row(
+                children: [
+                  Text('Cỡ điểm: ${seg.markerSize.toInt()}  ',
+                      style: const TextStyle(fontSize: 12)),
+                  Expanded(
+                    child: Slider(
+                      value: seg.markerSize,
+                      min: 10,
+                      max: 40,
+                      activeColor: colorOutgoing,
+                      onChanged: (v) => setState(() => seg.markerSize = v),
+                    ),
+                  ),
+                ],
+              ),
+              Row(
+                children: [
+                  Text('Cỡ chữ: ${seg.markerTextSize.toInt()}  ',
+                      style: const TextStyle(fontSize: 12)),
+                  Expanded(
+                    child: Slider(
+                      value: seg.markerTextSize,
+                      min: 8,
+                      max: 20,
+                      divisions: 12,
+                      activeColor: colorOutgoing,
+                      onChanged: (v) => setState(() => seg.markerTextSize = v),
+                    ),
+                  ),
+                ],
+              ),
+              Row(
+                children: [
+                  _colorPickerBtn('Màu đi', seg.startColor,
+                      (c) => setState(() => seg.startColor = c)),
+                  const SizedBox(width: 8),
+                  _posPickerBtn('Vị trí chữ', seg.startTextPos,
+                      (p) => setState(() => seg.startTextPos = p)),
+                  const SizedBox(width: 24),
+                  _colorPickerBtn('Màu đến', seg.endColor,
+                      (c) => setState(() => seg.endColor = c)),
+                  const SizedBox(width: 8),
+                  _posPickerBtn('Vị trí chữ', seg.endTextPos,
+                      (p) => setState(() => seg.endTextPos = p)),
+                ],
+              ),
+              Row(
+                children: [
+                  Row(children: [
+                    Checkbox(
+                        value: seg.showStartLabel,
+                        onChanged: (v) =>
+                            setState(() => seg.showStartLabel = v!),
+                        activeColor: colorOutgoing),
+                    const Text('Hiện tên đi', style: TextStyle(fontSize: 11)),
+                  ]),
+                  const SizedBox(width: 16),
+                  Row(children: [
+                    Checkbox(
+                        value: seg.showEndLabel,
+                        onChanged: (v) => setState(() => seg.showEndLabel = v!),
+                        activeColor: colorOutgoing),
+                    const Text('Hiện tên đến', style: TextStyle(fontSize: 11)),
+                  ]),
+                ],
+              ),
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  onPressed: seg.hasCustomMarkerPosition
+                      ? () => setState(() => seg.resetMarkerPositions())
+                      : null,
+                  icon: const Icon(Icons.my_location, size: 16),
+                  label: const Text('Đặt lại vị trí marker'),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: colorOutgoing,
+                    side: BorderSide(color: Colors.grey.shade300),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(8)),
+                  ),
+                ),
+              ),
             ]),
-            const SizedBox(height: 12),
-            // Label
-            Text('Ghi chú', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Colors.grey.shade600)),
-            const SizedBox(height: 6),
-            TextField(
-              controller: TextEditingController(text: seg.label ?? ''),
-              onChanged: (v) => seg.label = v.isEmpty ? null : v,
-              decoration: InputDecoration(
-                hintText: 'VD: 1h30 bay', hintStyle: TextStyle(color: Colors.grey.shade400, fontSize: 13),
-                filled: true, fillColor: const Color(0xFFF9FAFB), isDense: true,
-                contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide(color: Colors.grey.shade300)),
-                enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide(color: Colors.grey.shade300)),
-              ),
-              style: const TextStyle(fontSize: 13),
-            ),
-            const SizedBox(height: 6),
-            Row(
-              children: [
-                _formatButton('B', Icons.format_bold, seg.isLabelBold, () => setState(() => seg.isLabelBold = !seg.isLabelBold)),
-                const SizedBox(width: 8),
-                _formatButton('I', Icons.format_italic, seg.isLabelItalic, () => setState(() => seg.isLabelItalic = !seg.isLabelItalic)),
-              ],
-            ),
-            const SizedBox(height: 12),
-            // Transport icon
-            Text('Phương tiện', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Colors.grey.shade600)),
-            const SizedBox(height: 6),
-            Wrap(spacing: 6, children: TransportMode.values.where((m) => m != TransportMode.none).map((mode) {
-              final isActive = seg.transportMode == mode;
-              return GestureDetector(
-                onTap: () => setState(() => seg.transportMode = isActive ? TransportMode.none : mode),
-                child: Container(width: 36, height: 36,
-                  decoration: BoxDecoration(
-                    color: isActive ? colorOutgoing.withOpacity(0.15) : Colors.grey.shade100,
-                    borderRadius: BorderRadius.circular(8),
-                    border: isActive ? Border.all(color: colorOutgoing, width: 2) : null),
-                  child: Icon(transportIconData(mode), size: 18, color: isActive ? colorOutgoing : Colors.grey.shade500)),
-              );
-            }).toList()),
-            const SizedBox(height: 12),
-            // Sliders for Position and Sizes
-            Text('Vị trí ghi chú', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Colors.grey.shade600)),
-            Slider(
-              value: seg.labelPosition, min: 0.05, max: 0.95,
-              activeColor: colorOutgoing,
-              onChanged: (v) => setState(() => seg.labelPosition = v),
-            ),
-            
-            Text('Cỡ chữ', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Colors.grey.shade600)),
-            Slider(
-              value: seg.labelSize, min: 8.0, max: 24.0, divisions: 16,
-              activeColor: colorOutgoing,
-              onChanged: (v) => setState(() => seg.labelSize = v),
-            ),
-
-            Text('Cỡ Icon', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Colors.grey.shade600)),
-            Slider(
-              value: seg.iconSize, min: 14.0, max: 36.0, divisions: 22,
-              activeColor: colorOutgoing,
-              onChanged: (v) => setState(() => seg.iconSize = v),
-            ),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                const Text('Đảo vị trí Icon/Chữ', style: TextStyle(fontSize: 12)),
-                Switch(
-                  value: seg.swapLabelIcon,
-                  onChanged: (v) => setState(() => seg.swapLabelIcon = v),
-                  activeColor: colorOutgoing,
-                ),
-              ],
-            ),
-            const SizedBox(height: 12),
-            Text('Tùy chỉnh Điểm dừng (Marker)', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Colors.grey.shade600)),
-            Row(
-              children: [
-                Text('Cỡ điểm: ${seg.markerSize.toInt()}  ', style: const TextStyle(fontSize: 12)),
-                Expanded(
-                  child: Slider(
-                    value: seg.markerSize, min: 10, max: 40,
-                    activeColor: colorOutgoing,
-                    onChanged: (v) => setState(() => seg.markerSize = v),
-                  ),
-                ),
-              ],
-            ),
-            Row(
-              children: [
-                Text('Cỡ chữ: ${seg.markerTextSize.toInt()}  ', style: const TextStyle(fontSize: 12)),
-                Expanded(
-                  child: Slider(
-                    value: seg.markerTextSize, min: 8, max: 20, divisions: 12,
-                    activeColor: colorOutgoing,
-                    onChanged: (v) => setState(() => seg.markerTextSize = v),
-                  ),
-                ),
-              ],
-            ),
-            Row(
-              children: [
-                _colorPickerBtn('Màu đi', seg.startColor, (c) => setState(() => seg.startColor = c)),
-                const SizedBox(width: 8),
-                _posPickerBtn('Vị trí chữ', seg.startTextPos, (p) => setState(() => seg.startTextPos = p)),
-                const SizedBox(width: 24),
-                _colorPickerBtn('Màu đến', seg.endColor, (c) => setState(() => seg.endColor = c)),
-                const SizedBox(width: 8),
-                _posPickerBtn('Vị trí chữ', seg.endTextPos, (p) => setState(() => seg.endTextPos = p)),
-              ],
-            ),
-            Row(
-              children: [
-                Row(children: [
-                  Checkbox(value: seg.showStartLabel, onChanged: (v) => setState(() => seg.showStartLabel = v!), activeColor: colorOutgoing),
-                  const Text('Hiện tên đi', style: TextStyle(fontSize: 11)),
-                ]),
-                const SizedBox(width: 16),
-                Row(children: [
-                  Checkbox(value: seg.showEndLabel, onChanged: (v) => setState(() => seg.showEndLabel = v!), activeColor: colorOutgoing),
-                  const Text('Hiện tên đến', style: TextStyle(fontSize: 11)),
-                ]),
-              ],
-            ),
-          ]),
-        ),
+          ),
       ]),
     );
   }
 
   Widget _styleButton(String text, bool active, VoidCallback onTap) {
-    return Expanded(child: GestureDetector(onTap: onTap,
+    return Expanded(
+        child: GestureDetector(
+      onTap: onTap,
       child: Container(
         padding: const EdgeInsets.symmetric(vertical: 8),
         decoration: BoxDecoration(
-          color: active ? const Color(0xFFF0FDF4) : Colors.grey.shade100,
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: active ? colorOutgoing : Colors.grey.shade300, width: active ? 2 : 1)),
-        child: Text(text, textAlign: TextAlign.center,
-          style: TextStyle(fontSize: 12, fontWeight: active ? FontWeight.w600 : FontWeight.w400,
-            color: active ? colorOutgoing : Colors.grey.shade600)),
+            color: active ? const Color(0xFFF0FDF4) : Colors.grey.shade100,
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(
+                color: active ? colorOutgoing : Colors.grey.shade300,
+                width: active ? 2 : 1)),
+        child: Text(text,
+            textAlign: TextAlign.center,
+            style: TextStyle(
+                fontSize: 12,
+                fontWeight: active ? FontWeight.w600 : FontWeight.w400,
+                color: active ? colorOutgoing : Colors.grey.shade600)),
       ),
     ));
   }
 
-  Widget _formatButton(String label, IconData icon, bool active, VoidCallback onTap) {
+  Widget _formatButton(
+      String label, IconData icon, bool active, VoidCallback onTap) {
     return GestureDetector(
       onTap: onTap,
       child: Container(
-        width: 36, height: 32,
+        width: 36,
+        height: 32,
         decoration: BoxDecoration(
-          color: active ? colorOutgoing.withOpacity(0.15) : Colors.grey.shade100,
+          color:
+              active ? colorOutgoing.withOpacity(0.15) : Colors.grey.shade100,
           borderRadius: BorderRadius.circular(6),
-          border: active ? Border.all(color: colorOutgoing, width: 1.5) : Border.all(color: Colors.grey.shade300),
+          border: active
+              ? Border.all(color: colorOutgoing, width: 1.5)
+              : Border.all(color: Colors.grey.shade300),
         ),
-        child: Icon(icon, size: 18, color: active ? colorOutgoing : Colors.grey.shade600),
+        child: Icon(icon,
+            size: 18, color: active ? colorOutgoing : Colors.grey.shade600),
       ),
     );
+  }
+
+  Widget _buildImageOverlay(MapImageOverlay overlay) {
+    final isActive = _activeOverlayId == overlay.id;
+    return _buildResizableOverlay(
+      id: overlay.id,
+      position: overlay.position,
+      size: overlay.size,
+      onMove: (delta) => setState(() => overlay.position += delta),
+      onResize: (delta) => setState(() {
+        overlay.size = Size(
+          max(48, overlay.size.width + delta.dx),
+          max(32, overlay.size.height + delta.dy),
+        );
+      }),
+      onDelete: () => setState(() => _imageOverlays.remove(overlay)),
+      showControls: isActive,
+      child: Image.memory(
+        overlay.bytes,
+        width: overlay.size.width,
+        height: overlay.size.height,
+        fit: BoxFit.contain,
+      ),
+    );
+  }
+
+  Widget _buildTextOverlay(MapTextOverlay overlay) {
+    final isActive = _activeOverlayId == overlay.id;
+    return _buildResizableOverlay(
+      id: overlay.id,
+      position: overlay.position,
+      size: overlay.size,
+      onMove: (delta) => setState(() => overlay.position += delta),
+      onResize: (delta) => setState(() {
+        overlay.size = Size(
+          max(60, overlay.size.width + delta.dx),
+          max(28, overlay.size.height + delta.dy),
+        );
+      }),
+      onDelete: () => setState(() => _textOverlays.remove(overlay)),
+      onDoubleTap: () => _editTextOverlay(overlay),
+      showControls: isActive,
+      child: SizedBox(
+        width: overlay.size.width,
+        height: overlay.size.height,
+        child: FittedBox(
+          fit: BoxFit.contain,
+          alignment: Alignment.center,
+          child: Text(
+            overlay.text,
+            textAlign: TextAlign.center,
+            style: const TextStyle(
+              color: Colors.black,
+              fontWeight: FontWeight.w800,
+              shadows: [
+                Shadow(color: Colors.white, blurRadius: 4),
+                Shadow(color: Colors.white, blurRadius: 4),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildResizableOverlay({
+    required String id,
+    required Offset position,
+    required Size size,
+    required Widget child,
+    required ValueChanged<Offset> onMove,
+    required ValueChanged<Offset> onResize,
+    required VoidCallback onDelete,
+    required bool showControls,
+    VoidCallback? onDoubleTap,
+  }) {
+    return Positioned(
+      left: position.dx,
+      top: position.dy,
+      child: MouseRegion(
+        cursor: SystemMouseCursors.move,
+        onEnter: (_) => setState(() => _activeOverlayId = id),
+        onExit: (_) => setState(() => _activeOverlayId = null),
+        child: GestureDetector(
+          behavior: HitTestBehavior.translucent,
+          onPanUpdate: (details) => onMove(details.delta),
+          onDoubleTap: onDoubleTap,
+          child: SizedBox(
+            width: size.width,
+            height: size.height,
+            child: Stack(
+              clipBehavior: Clip.none,
+              children: [
+                Positioned.fill(child: child),
+                if (showControls)
+                  Positioned.fill(
+                    child: IgnorePointer(
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          border: Border.all(
+                            color: colorOutgoing.withOpacity(0.55),
+                            width: 1,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                if (showControls)
+                  Positioned(
+                    top: 4,
+                    right: 4,
+                    child: GestureDetector(
+                      onTap: onDelete,
+                      child: Container(
+                        width: 28,
+                        height: 28,
+                        decoration: const BoxDecoration(
+                          color: Colors.white,
+                          shape: BoxShape.circle,
+                          boxShadow: [
+                            BoxShadow(color: Colors.black26, blurRadius: 4)
+                          ],
+                        ),
+                        child: const Icon(Icons.close, size: 16),
+                      ),
+                    ),
+                  ),
+                if (showControls)
+                  Positioned(
+                    right: 4,
+                    bottom: 4,
+                    child: MouseRegion(
+                      cursor: SystemMouseCursors.resizeDownRight,
+                      child: GestureDetector(
+                        onPanUpdate: (details) => onResize(details.delta),
+                        child: Container(
+                          width: 24,
+                          height: 24,
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            borderRadius: BorderRadius.circular(4),
+                            boxShadow: const [
+                              BoxShadow(color: Colors.black26, blurRadius: 4)
+                            ],
+                          ),
+                          child: const Icon(Icons.open_in_full, size: 14),
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _editTextOverlay(MapTextOverlay overlay) async {
+    final controller = TextEditingController(text: overlay.text);
+    final text = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Sửa chữ'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          maxLines: 3,
+          decoration: const InputDecoration(border: OutlineInputBorder()),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Hủy'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(controller.text.trim()),
+            child: const Text('Lưu'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (text == null || text.isEmpty) return;
+    setState(() => overlay.text = text);
   }
 
   // =========================================================================
@@ -646,23 +1348,32 @@ class _HomePageState extends State<HomePage> {
               color: Colors.white.withOpacity(0.95),
               borderRadius: BorderRadius.circular(12),
               border: Border.all(color: Colors.grey.shade300),
-              boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 10, offset: Offset(0, 4))],
+              boxShadow: const [
+                BoxShadow(
+                    color: Colors.black12, blurRadius: 10, offset: Offset(0, 4))
+              ],
             ),
             child: IntrinsicWidth(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  const Text('Chú thích', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+                  const Text('Chú thích',
+                      style:
+                          TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
                   const SizedBox(height: 12),
-                  _buildLegendItem(Icons.flight, 'Plane'),
+                  _buildLegendCircle(Colors.blue, 'Starting point'),
                   const SizedBox(height: 8),
-                  _buildLegendItem(Icons.directions_bus, 'Shuttle bus'),
+                  _buildLegendCircle(Colors.red, 'Ending point'),
                   const SizedBox(height: 8),
                   _buildLegendLine(colorOutgoing, 'Route'),
                   const SizedBox(height: 8),
                   _buildLegendLine(colorReturn, 'Route back'),
-                  
+                  for (final mode in _legendTransportModes) ...[
+                    const SizedBox(height: 8),
+                    _buildLegendItem(
+                        transportIconData(mode), _transportLegendLabel(mode)),
+                  ],
                   const SizedBox(height: 8),
                   Align(
                     alignment: Alignment.bottomRight,
@@ -676,7 +1387,8 @@ class _HomePageState extends State<HomePage> {
                             if (_legendScale > 2.0) _legendScale = 2.0;
                           });
                         },
-                        child: const Icon(Icons.open_with, size: 16, color: Colors.grey),
+                        child: const Icon(Icons.open_with,
+                            size: 16, color: Colors.grey),
                       ),
                     ),
                   ),
@@ -689,34 +1401,62 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
+  String _transportLegendLabel(TransportMode mode) {
+    switch (mode) {
+      case TransportMode.plane:
+        return 'Plane';
+      case TransportMode.car:
+        return 'Car';
+      case TransportMode.motorcycle:
+        return 'Motorcycle';
+      case TransportMode.bus:
+        return 'Shuttle bus';
+      case TransportMode.train:
+        return 'Train';
+      case TransportMode.walking:
+        return 'Walking';
+      case TransportMode.none:
+        return '';
+    }
+  }
+
   Widget _buildLegendItem(IconData icon, String label) {
     return Row(children: [
       Icon(icon, size: 18, color: Colors.grey.shade800),
       const SizedBox(width: 10),
-      Text(label, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
+      Text(label,
+          style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
     ]);
   }
 
   Widget _buildLegendCircle(Color borderColor, String label) {
     return Row(children: [
       Container(
-        width: 14, height: 14,
+        width: 14,
+        height: 14,
         margin: const EdgeInsets.symmetric(horizontal: 2),
-        decoration: BoxDecoration(color: Colors.white, shape: BoxShape.circle, border: Border.all(color: borderColor, width: 3)),
+        decoration: BoxDecoration(
+            color: Colors.white,
+            shape: BoxShape.circle,
+            border: Border.all(color: borderColor, width: 3)),
       ),
       const SizedBox(width: 10),
-      Text(label, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
+      Text(label,
+          style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
     ]);
   }
 
   Widget _buildLegendLine(Color color, String label) {
     return Row(children: [
       Container(
-        width: 18, height: 3,
-        decoration: BoxDecoration(color: color, borderRadius: BorderRadius.circular(2)),
+        width: 18,
+        height: 3,
+        decoration:
+            BoxDecoration(color: color, borderRadius: BorderRadius.circular(2)),
       ),
       const SizedBox(width: 10),
-      Text(label, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
+      Text(label,
+          style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
     ]);
   }
 
@@ -730,18 +1470,26 @@ class _HomePageState extends State<HomePage> {
       child: FlutterMap(
         mapController: _mapController,
         options: MapOptions(
-          initialCenter: LatLng(16.0, 106.0), initialZoom: 5.8, minZoom: 4, maxZoom: 10,
+          initialCenter: LatLng(15.4, 106.8),
+          initialZoom: 5.1,
+          minZoom: 3.6,
+          maxZoom: 10,
           backgroundColor: const Color(0xFFE8F4FD),
         ),
         children: [
           PolygonLayer(
-            polygons: vietnamBorderPolygons.map((ring) => Polygon(
-              points: ring,
-              color: const Color(0xFFFDE68A),
-              borderColor: const Color(0xFFFDE68A),
-              borderStrokeWidth: 1.2,
-              isFilled: true,
-            )).toList(),
+            polygons: _buildCountryPolygons(),
+          ),
+          PolygonLayer(
+            polygons: _disputedIslandRings
+                .map((ring) => Polygon(
+                      points: ring,
+                      color: const Color(0xFFFDE68A),
+                      borderColor: const Color(0xFFEAB308),
+                      borderStrokeWidth: 1.2,
+                      isFilled: true,
+                    ))
+                .toList(),
           ),
           PolylineLayer(polylines: _buildRoutePolylines()),
           MarkerLayer(markers: _buildRouteLabelMarkers()),
@@ -751,49 +1499,140 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
+  List<Polygon> _buildCountryPolygons() {
+    final polygons = <Polygon>[];
+    for (final country in _countryBoundaries) {
+      final isVietnam = country.code == 'VNM';
+      for (final ring in country.rings) {
+        polygons.add(Polygon(
+          points: ring,
+          color: isVietnam ? const Color(0xFFFDE68A) : const Color(0xFFE7E5E4),
+          borderColor:
+              isVietnam ? const Color(0xFFEAB308) : const Color(0xFFD6D3D1),
+          borderStrokeWidth: isVietnam ? 1.2 : 1,
+          isFilled: true,
+        ));
+      }
+    }
+    return polygons;
+  }
+
   List<Marker> _buildMapMarkers() {
     final markers = <Marker>[];
-    for (var seg in _routes) {
-      markers.add(_createCityMarker(seg.startCity, seg.startColor, seg.markerSize, seg.markerTextSize, seg.startTextPos, seg.showStartLabel));
-      markers.add(_createCityMarker(seg.endCity, seg.endColor, seg.markerSize, seg.markerTextSize, seg.endTextPos, seg.showEndLabel));
+    for (int i = 0; i < _routes.length; i++) {
+      final seg = _routes[i];
+      markers.add(_createCityMarker(
+        waypoint: seg.startCity,
+        position: seg.effectiveStartPosition,
+        borderColor: seg.startColor,
+        size: seg.markerSize,
+        textSize: seg.markerTextSize,
+        textPos: seg.startTextPos,
+        showLabel: seg.showStartLabel,
+        onDrag: (details) => _onCityMarkerDrag(details, i, true),
+      ));
+      markers.add(_createCityMarker(
+        waypoint: seg.endCity,
+        position: seg.effectiveEndPosition,
+        borderColor: seg.endColor,
+        size: seg.markerSize,
+        textSize: seg.markerTextSize,
+        textPos: seg.endTextPos,
+        showLabel: seg.showEndLabel,
+        onDrag: (details) => _onCityMarkerDrag(details, i, false),
+      ));
     }
     return markers;
   }
 
-  Marker _createCityMarker(Waypoint wp, Color borderColor, double size, double textSize, String textPos, bool showLabel) {
+  Marker _createCityMarker({
+    required Waypoint waypoint,
+    required LatLng position,
+    required Color borderColor,
+    required double size,
+    required double textSize,
+    required String textPos,
+    required bool showLabel,
+    required GestureDragUpdateCallback onDrag,
+  }) {
     Widget textWidget = Container(
-      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
-      child: Text(wp.name, style: TextStyle(color: Colors.black, fontSize: textSize, fontWeight: FontWeight.w800,
-        shadows: const [Shadow(color: Colors.white, blurRadius: 4), Shadow(color: Colors.white, blurRadius: 4)]))
-    );
+        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+        child: Text(waypoint.name,
+            style: TextStyle(
+                color: Colors.black,
+                fontSize: textSize,
+                fontWeight: FontWeight.w800,
+                shadows: const [
+                  Shadow(color: Colors.white, blurRadius: 4),
+                  Shadow(color: Colors.white, blurRadius: 4)
+                ])));
 
     Widget iconWidget = Container(
-      width: size, height: size,
+      width: size,
+      height: size,
       decoration: BoxDecoration(
-        color: Colors.white, shape: BoxShape.circle,
+        color: Colors.white,
+        shape: BoxShape.circle,
         border: Border.all(color: borderColor, width: 4),
-        boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 4, offset: Offset(0, 2))],
+        boxShadow: const [
+          BoxShadow(color: Colors.black26, blurRadius: 4, offset: Offset(0, 2))
+        ],
       ),
     );
 
     return Marker(
-      point: wp.position, width: 150, height: 150,
-      child: Stack(
-        clipBehavior: Clip.none,
-        alignment: Alignment.center,
-        children: [
-          if (showLabel)
-            Positioned(
-              top: textPos == 'bottom' ? 75 + (size/2) + 2 : (textPos == 'left' || textPos == 'right' ? 0 : null),
-              bottom: textPos == 'top' ? 75 + (size/2) + 2 : (textPos == 'left' || textPos == 'right' ? 0 : null),
-              left: textPos == 'right' ? 75 + (size/2) + 2 : (textPos == 'top' || textPos == 'bottom' ? 0 : null),
-              right: textPos == 'left' ? 75 + (size/2) + 2 : (textPos == 'top' || textPos == 'bottom' ? 0 : null),
-              child: Center(child: textWidget),
+        point: position,
+        width: 150,
+        height: 150,
+        child: MouseRegion(
+          cursor: SystemMouseCursors.move,
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onPanUpdate: onDrag,
+            child: Stack(
+              clipBehavior: Clip.none,
+              alignment: Alignment.center,
+              children: [
+                if (showLabel)
+                  Positioned(
+                    top: textPos == 'bottom'
+                        ? 75 + (size / 2) + 2
+                        : (textPos == 'left' || textPos == 'right' ? 0 : null),
+                    bottom: textPos == 'top'
+                        ? 75 + (size / 2) + 2
+                        : (textPos == 'left' || textPos == 'right' ? 0 : null),
+                    left: textPos == 'right'
+                        ? 75 + (size / 2) + 2
+                        : (textPos == 'top' || textPos == 'bottom' ? 0 : null),
+                    right: textPos == 'left'
+                        ? 75 + (size / 2) + 2
+                        : (textPos == 'top' || textPos == 'bottom' ? 0 : null),
+                    child: Center(child: textWidget),
+                  ),
+                iconWidget,
+              ],
             ),
-          iconWidget,
-        ],
-      )
-    );
+          ),
+        ));
+  }
+
+  void _onCityMarkerDrag(
+      DragUpdateDetails details, int segIndex, bool isStart) {
+    final mapBox = _mapKey.currentContext?.findRenderObject() as RenderBox?;
+    if (mapBox == null) return;
+    final localPos = mapBox.globalToLocal(details.globalPosition);
+    try {
+      final latLng =
+          _mapController.camera.pointToLatLng(Point(localPos.dx, localPos.dy));
+      setState(() {
+        final seg = _routes[segIndex];
+        if (isStart) {
+          seg.customStartPosition = latLng;
+        } else {
+          seg.customEndPosition = latLng;
+        }
+      });
+    } catch (_) {}
   }
 
   // =========================================================================
@@ -803,9 +1642,9 @@ class _HomePageState extends State<HomePage> {
     if (_routes.isEmpty) return [];
     final lines = <Polyline>[];
     for (var seg in _routes) {
-      final start = seg.startCity.position;
-      final end = seg.endCity.position;
-      
+      final start = seg.effectiveStartPosition;
+      final end = seg.effectiveEndPosition;
+
       lines.add(Polyline(
         points: _generateArc(start, end, -0.3, segments: 50),
         color: colorOutgoing,
@@ -836,29 +1675,33 @@ class _HomePageState extends State<HomePage> {
       final hasIcon = seg.transportMode != TransportMode.none;
       if (!hasLabel && !hasIcon) continue;
 
-      final start = seg.startCity.position;
-      final end = seg.endCity.position;
-      
-      markers.add(_createTransparentLabelMarker(start, end, -0.3, seg, colorOutgoing, i));
+      final start = seg.effectiveStartPosition;
+      final end = seg.effectiveEndPosition;
+
+      markers.add(_createTransparentLabelMarker(
+          start, end, -0.3, seg, colorOutgoing, i));
     }
     return markers;
   }
 
-  Marker _createTransparentLabelMarker(LatLng start, LatLng end, double curveScale, RouteSegment seg, Color color, int segIndex) {
+  Marker _createTransparentLabelMarker(LatLng start, LatLng end,
+      double curveScale, RouteSegment seg, Color color, int segIndex) {
     final t = seg.labelPosition;
     final pos = _bezierPoint(start, end, curveScale, t);
-    
+
     final p0 = _bezierPoint(start, end, curveScale, (t - 0.01).clamp(0.0, 1.0));
     final p1 = _bezierPoint(start, end, curveScale, (t + 0.01).clamp(0.0, 1.0));
     final dx = p1.longitude - p0.longitude;
     final dy = p1.latitude - p0.latitude;
-    
+
     double screenAngle = atan2(-dy, dx);
     bool flip = dx < 0;
-    if (flip) screenAngle += pi; 
+    if (flip) screenAngle += pi;
 
     return Marker(
-      point: pos, width: 160, height: 80,
+      point: pos,
+      width: 160,
+      height: 80,
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
         onPanUpdate: (details) => _onLabelDrag(details, segIndex, curveScale),
@@ -873,31 +1716,44 @@ class _HomePageState extends State<HomePage> {
                   Positioned(
                     top: seg.swapLabelIcon ? null : 44,
                     bottom: seg.swapLabelIcon ? 44 : null,
-                    left: 0, right: 0,
+                    left: 0,
+                    right: 0,
                     child: Center(
-                      child: Text(
-                        seg.label!,
-                        style: TextStyle(
-                          fontSize: seg.labelSize, 
-                          fontWeight: seg.isLabelBold ? FontWeight.w800 : FontWeight.w500, 
-                          fontStyle: seg.isLabelItalic ? FontStyle.italic : FontStyle.normal,
-                          color: Colors.black,
-                          shadows: const [Shadow(color: Colors.white, blurRadius: 4), Shadow(color: Colors.white, blurRadius: 4)]
-                        )
-                      ),
+                      child: Text(seg.label!,
+                          style: TextStyle(
+                              fontSize: seg.labelSize,
+                              fontWeight: seg.isLabelBold
+                                  ? FontWeight.w800
+                                  : FontWeight.w500,
+                              fontStyle: seg.isLabelItalic
+                                  ? FontStyle.italic
+                                  : FontStyle.normal,
+                              color: Colors.black,
+                              shadows: const [
+                                Shadow(color: Colors.white, blurRadius: 4),
+                                Shadow(color: Colors.white, blurRadius: 4)
+                              ])),
                     ),
                   ),
                 if (seg.transportMode != TransportMode.none)
                   Positioned(
                     top: seg.swapLabelIcon ? 44 : null,
                     bottom: seg.swapLabelIcon ? null : 44,
-                    left: 0, right: 0,
+                    left: 0,
+                    right: 0,
                     child: Center(
-                      child: Container(
-                        decoration: BoxDecoration(shape: BoxShape.circle, boxShadow: [BoxShadow(color: Colors.white.withOpacity(0.8), blurRadius: 8, spreadRadius: 2)]),
-                        child: Icon(transportIconData(seg.transportMode), size: seg.iconSize, color: Colors.black),
-                      )
-                    ),
+                        child: Container(
+                      decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          boxShadow: [
+                            BoxShadow(
+                                color: Colors.white.withOpacity(0.8),
+                                blurRadius: 8,
+                                spreadRadius: 2)
+                          ]),
+                      child: Icon(transportIconData(seg.transportMode),
+                          size: seg.iconSize, color: Colors.black),
+                    )),
                   ),
               ],
             ),
@@ -907,26 +1763,32 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  void _onLabelDrag(DragUpdateDetails details, int segIndex, double curveScale) {
+  void _onLabelDrag(
+      DragUpdateDetails details, int segIndex, double curveScale) {
     final mapBox = _mapKey.currentContext?.findRenderObject() as RenderBox?;
     if (mapBox == null) return;
     final localPos = mapBox.globalToLocal(details.globalPosition);
     try {
-      final latLng = _mapController.camera.pointToLatLng(Point(localPos.dx, localPos.dy));
-      final start = _routes[segIndex].startCity.position;
-      final end = _routes[segIndex].endCity.position;
+      final latLng =
+          _mapController.camera.pointToLatLng(Point(localPos.dx, localPos.dy));
+      final start = _routes[segIndex].effectiveStartPosition;
+      final end = _routes[segIndex].effectiveEndPosition;
       final newT = _findClosestT(start, end, curveScale, latLng);
       setState(() => _routes[segIndex].labelPosition = newT);
     } catch (_) {}
   }
 
-  double _findClosestT(LatLng start, LatLng end, double curveScale, LatLng target) {
+  double _findClosestT(
+      LatLng start, LatLng end, double curveScale, LatLng target) {
     double bestT = 0.5, bestDist = double.infinity;
     for (int i = 0; i <= 200; i++) {
       final t = i / 200.0;
       final pt = _bezierPoint(start, end, curveScale, t);
       final d = _distSq(pt, target);
-      if (d < bestDist) { bestDist = d; bestT = t; }
+      if (d < bestDist) {
+        bestDist = d;
+        bestT = t;
+      }
     }
     return bestT.clamp(0.05, 0.95);
   }
@@ -947,11 +1809,11 @@ class _HomePageState extends State<HomePage> {
     if (distance < 1e-9) return start;
     final midLat = (start.latitude + end.latitude) / 2;
     final midLng = (start.longitude + end.longitude) / 2;
-    
+
     final perpScale = distance * curveScale;
     final cLat = midLat + (-dx / distance) * perpScale;
     final cLng = midLng + (dy / distance) * perpScale;
-    
+
     final omt = 1 - t;
     return LatLng(
       omt * omt * start.latitude + 2 * omt * t * cLat + t * t * end.latitude,
@@ -959,7 +1821,9 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  List<LatLng> _generateArc(LatLng start, LatLng end, double curveScale, {int segments = 50}) {
-    return List.generate(segments + 1, (i) => _bezierPoint(start, end, curveScale, i / segments));
+  List<LatLng> _generateArc(LatLng start, LatLng end, double curveScale,
+      {int segments = 50}) {
+    return List.generate(segments + 1,
+        (i) => _bezierPoint(start, end, curveScale, i / segments));
   }
 }

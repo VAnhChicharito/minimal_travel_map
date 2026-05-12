@@ -56,12 +56,22 @@ class MapTextOverlay {
     required this.text,
     this.position = const Offset(100, 100),
     this.size = const Size(240, 80),
+    this.color = Colors.black,
+    this.fontSize = 16.0,
+    this.isBold = false,
+    this.isItalic = false,
+    this.textAlign = TextAlign.center,
   });
 
   final String id;
   String text;
   Offset position;
   Size size;
+  Color color;
+  double fontSize;
+  bool isBold;
+  bool isItalic;
+  TextAlign textAlign;
 }
 
 class CountryBoundary {
@@ -96,6 +106,10 @@ class _HomePageState extends State<HomePage> {
   double _legendScale = 1.0;
   Set<TransportMode> _legendTransportModes = {};
   String? _activeOverlayId;
+
+  // Crop State
+  bool _isCropMode = false;
+  Rect _cropRect = const Rect.fromLTWH(50, 50, 600, 400);
 
   final List<Color> _presetColors = const [
     Colors.blue,
@@ -365,7 +379,30 @@ class _HomePageState extends State<HomePage> {
     try {
       RenderRepaintBoundary boundary = _boundaryKey.currentContext!
           .findRenderObject() as RenderRepaintBoundary;
-      ui.Image image = await boundary.toImage(pixelRatio: 3.0);
+      const double pr = 3.0;
+      ui.Image image = await boundary.toImage(pixelRatio: pr);
+
+      if (_isCropMode) {
+        final recorder = ui.PictureRecorder();
+        final canvas = Canvas(recorder);
+        final paint = Paint();
+
+        final src = Rect.fromLTWH(
+          _cropRect.left * pr,
+          _cropRect.top * pr,
+          _cropRect.width * pr,
+          _cropRect.height * pr,
+        );
+        final dst =
+            Rect.fromLTWH(0, 0, _cropRect.width * pr, _cropRect.height * pr);
+
+        canvas.drawImageRect(image, src, dst, paint);
+        image = await recorder.endRecording().toImage(
+              (_cropRect.width * pr).toInt(),
+              (_cropRect.height * pr).toInt(),
+            );
+      }
+
       ByteData? byteData =
           await image.toByteData(format: ui.ImageByteFormat.png);
       if (byteData != null) {
@@ -397,19 +434,118 @@ class _HomePageState extends State<HomePage> {
       body: Row(children: [
         SizedBox(width: 380, child: _buildControlPanel()),
         Expanded(
-          child: RepaintBoundary(
-            key: _boundaryKey,
-            child: Stack(
-              children: [
-                _buildMap(),
-                ..._imageOverlays.map(_buildImageOverlay),
-                ..._textOverlays.map(_buildTextOverlay),
-                if (_showLegend) _buildLegend(),
-              ],
-            ),
+          child: Stack(
+            children: [
+              RepaintBoundary(
+                key: _boundaryKey,
+                child: Stack(
+                  children: [
+                    _buildMap(),
+                    ..._imageOverlays.map(_buildImageOverlay),
+                    ..._textOverlays.map(_buildTextOverlay),
+                    if (_showLegend) _buildLegend(),
+                  ],
+                ),
+              ),
+              if (_isCropMode) _buildCropOverlay(),
+            ],
           ),
         ),
       ]),
+    );
+  }
+
+  Widget _buildCropOverlay() {
+    return Positioned.fill(
+      child: Stack(
+        children: [
+          // Background Dim
+          ColorFiltered(
+            colorFilter: ColorFilter.mode(
+              Colors.black.withOpacity(0.5),
+              BlendMode.srcOut,
+            ),
+            child: Stack(
+              children: [
+                Container(decoration: const BoxDecoration(color: Colors.black)),
+                Positioned(
+                  left: _cropRect.left,
+                  top: _cropRect.top,
+                  child: Container(
+                    width: _cropRect.width,
+                    height: _cropRect.height,
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          // Draggable handles
+          Positioned(
+            left: _cropRect.left,
+            top: _cropRect.top,
+            child: GestureDetector(
+              onPanUpdate: (details) {
+                setState(() {
+                  _cropRect = Rect.fromLTWH(
+                    _cropRect.left + details.delta.dx,
+                    _cropRect.top + details.delta.dy,
+                    _cropRect.width,
+                    _cropRect.height,
+                  );
+                });
+              },
+              child: Container(
+                width: _cropRect.width,
+                height: _cropRect.height,
+                decoration: BoxDecoration(
+                  border: Border.all(color: colorOutgoing, width: 2),
+                ),
+                child: Stack(
+                  children: [
+                    Positioned(
+                      right: 0,
+                      bottom: 0,
+                      child: GestureDetector(
+                        onPanUpdate: (details) {
+                          setState(() {
+                            _cropRect = Rect.fromLTWH(
+                              _cropRect.left,
+                              _cropRect.top,
+                              max(50, _cropRect.width + details.delta.dx),
+                              max(50, _cropRect.height + details.delta.dy),
+                            );
+                          });
+                        },
+                        child: Container(
+                          width: 30,
+                          height: 30,
+                          color: colorOutgoing,
+                          child: const Icon(Icons.open_in_full,
+                              size: 18, color: Colors.white),
+                        ),
+                      ),
+                    ),
+                    const Center(
+                      child: Text(
+                        'Kéo để di chuyển / Resize góc dưới',
+                        style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 12,
+                            fontWeight: FontWeight.bold,
+                            shadows: [Shadow(blurRadius: 4)]),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -435,10 +571,20 @@ class _HomePageState extends State<HomePage> {
                       fontSize: 20,
                       fontWeight: FontWeight.w700,
                       color: Colors.grey.shade800)),
-              IconButton(
-                tooltip: 'Xuất ảnh bản đồ',
-                icon: const Icon(Icons.download, color: colorOutgoing),
-                onPressed: _exportMap,
+              Row(
+                children: [
+                  IconButton(
+                    tooltip: 'Chọn vùng xuất ảnh',
+                    icon: Icon(Icons.crop,
+                        color: _isCropMode ? colorOutgoing : Colors.grey),
+                    onPressed: () => setState(() => _isCropMode = !_isCropMode),
+                  ),
+                  IconButton(
+                    tooltip: 'Xuất ảnh bản đồ',
+                    icon: const Icon(Icons.download, color: colorOutgoing),
+                    onPressed: _exportMap,
+                  ),
+                ],
               )
             ],
           ),
@@ -1193,13 +1339,15 @@ class _HomePageState extends State<HomePage> {
           alignment: Alignment.center,
           child: Text(
             overlay.text,
-            textAlign: TextAlign.center,
-            style: const TextStyle(
-              color: Colors.black,
-              fontWeight: FontWeight.w800,
+            textAlign: overlay.textAlign,
+            style: TextStyle(
+              color: overlay.color,
+              fontSize: overlay.fontSize,
+              fontWeight: overlay.isBold ? FontWeight.w800 : FontWeight.w500,
+              fontStyle: overlay.isItalic ? FontStyle.italic : FontStyle.normal,
               shadows: [
-                Shadow(color: Colors.white, blurRadius: 4),
-                Shadow(color: Colors.white, blurRadius: 4),
+                Shadow(color: Colors.white.withOpacity(0.8), blurRadius: 4),
+                Shadow(color: Colors.white.withOpacity(0.8), blurRadius: 4),
               ],
             ),
           ),
@@ -1303,31 +1451,131 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> _editTextOverlay(MapTextOverlay overlay) async {
     final controller = TextEditingController(text: overlay.text);
-    final text = await showDialog<String>(
+    await showDialog(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Sửa chữ'),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          maxLines: 3,
-          decoration: const InputDecoration(border: OutlineInputBorder()),
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('Sửa chữ'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  controller: controller,
+                  autofocus: true,
+                  maxLines: 3,
+                  decoration: const InputDecoration(
+                    labelText: 'Nội dung',
+                    border: OutlineInputBorder(),
+                  ),
+                  onChanged: (v) => setState(() => overlay.text = v),
+                ),
+                const SizedBox(height: 16),
+                Row(
+                  children: [
+                    const Text('Màu: '),
+                    ..._presetColors.map((c) => GestureDetector(
+                          onTap: () {
+                            setDialogState(() => overlay.color = c);
+                            setState(() {});
+                          },
+                          child: Container(
+                            width: 24,
+                            height: 24,
+                            margin: const EdgeInsets.only(right: 4),
+                            decoration: BoxDecoration(
+                              color: c,
+                              shape: BoxShape.circle,
+                              border: Border.all(
+                                color: overlay.color == c
+                                    ? Colors.black
+                                    : Colors.transparent,
+                                width: 2,
+                              ),
+                            ),
+                          ),
+                        )),
+                  ],
+                ),
+                const SizedBox(height: 16),
+                Row(
+                  children: [
+                    const Text('Cỡ chữ: '),
+                    Expanded(
+                      child: Slider(
+                        value: overlay.fontSize,
+                        min: 8,
+                        max: 72,
+                        onChanged: (v) {
+                          setDialogState(() => overlay.fontSize = v);
+                          setState(() {});
+                        },
+                      ),
+                    ),
+                    Text(overlay.fontSize.toInt().toString()),
+                  ],
+                ),
+                Row(
+                  children: [
+                    FilterChip(
+                      label: const Text('Đậm'),
+                      selected: overlay.isBold,
+                      onSelected: (v) {
+                        setDialogState(() => overlay.isBold = v);
+                        setState(() {});
+                      },
+                    ),
+                    const SizedBox(width: 8),
+                    FilterChip(
+                      label: const Text('Nghiêng'),
+                      selected: overlay.isItalic,
+                      onSelected: (v) {
+                        setDialogState(() => overlay.isItalic = v);
+                        setState(() {});
+                      },
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 16),
+                const Align(
+                    alignment: Alignment.centerLeft, child: Text('Căn lề:')),
+                const SizedBox(height: 8),
+                ToggleButtons(
+                  isSelected: [
+                    overlay.textAlign == TextAlign.left,
+                    overlay.textAlign == TextAlign.center,
+                    overlay.textAlign == TextAlign.right,
+                  ],
+                  onPressed: (index) {
+                    setDialogState(() {
+                      overlay.textAlign = [
+                        TextAlign.left,
+                        TextAlign.center,
+                        TextAlign.right
+                      ][index];
+                    });
+                    setState(() {});
+                  },
+                  borderRadius: BorderRadius.circular(8),
+                  children: const [
+                    Icon(Icons.format_align_left),
+                    Icon(Icons.format_align_center),
+                    Icon(Icons.format_align_right),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            FilledButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Xong'),
+            ),
+          ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('Hủy'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(context).pop(controller.text.trim()),
-            child: const Text('Lưu'),
-          ),
-        ],
       ),
     );
     controller.dispose();
-    if (text == null || text.isEmpty) return;
-    setState(() => overlay.text = text);
   }
 
   // =========================================================================
@@ -1358,10 +1606,7 @@ class _HomePageState extends State<HomePage> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  const Text('Chú thích',
-                      style:
-                          TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
-                  const SizedBox(height: 12),
+                  const SizedBox(height: 4),
                   _buildLegendCircle(Colors.blue, 'Starting point'),
                   const SizedBox(height: 8),
                   _buildLegendCircle(Colors.red, 'Ending point'),
@@ -1502,14 +1747,29 @@ class _HomePageState extends State<HomePage> {
   List<Polygon> _buildCountryPolygons() {
     final polygons = <Polygon>[];
     for (final country in _countryBoundaries) {
-      final isVietnam = country.code == 'VNM';
+      final code = country.code;
+      Color color = const Color(0xFFE7E5E4); // Default Grey
+      Color borderColor = const Color(0xFFD6D3D1);
+      double strokeWidth = 1.0;
+
+      if (code == 'VNM') {
+        color = const Color(0xFFFDE68A); // Yellow
+        borderColor = const Color(0xFFEAB308);
+        strokeWidth = 1.2;
+      } else if (code == 'LAO') {
+        color = const Color(0xFFBAE6FD); // Light Blue
+        borderColor = const Color(0xFF38BDF8);
+      } else if (code == 'KHM') {
+        color = const Color(0xFFFBCFE8); // Light Pink
+        borderColor = const Color(0xFFF472B6);
+      }
+
       for (final ring in country.rings) {
         polygons.add(Polygon(
           points: ring,
-          color: isVietnam ? const Color(0xFFFDE68A) : const Color(0xFFE7E5E4),
-          borderColor:
-              isVietnam ? const Color(0xFFEAB308) : const Color(0xFFD6D3D1),
-          borderStrokeWidth: isVietnam ? 1.2 : 1,
+          color: color,
+          borderColor: borderColor,
+          borderStrokeWidth: strokeWidth,
           isFilled: true,
         ));
       }

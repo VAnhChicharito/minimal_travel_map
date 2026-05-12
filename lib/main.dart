@@ -1861,11 +1861,12 @@ class _HomePageState extends State<HomePage> {
     
     Widget iconWidget;
     if (seg.markerStyle == MarkerStyle.halfBlueRed) {
-      // Half blue (left) and half red (right) circle
+      // White circle with half blue (left) and half red (right) border
       iconWidget = Container(
         width: size,
         height: size,
         decoration: BoxDecoration(
+          color: Colors.white,
           shape: BoxShape.circle,
           boxShadow: const [
             BoxShadow(color: Colors.black26, blurRadius: 4, offset: Offset(0, 2))
@@ -1873,7 +1874,7 @@ class _HomePageState extends State<HomePage> {
         ),
         child: Stack(
           children: [
-            // Left half - Blue
+            // Left half - Blue border
             Positioned(
               left: 0,
               top: 0,
@@ -1881,15 +1882,19 @@ class _HomePageState extends State<HomePage> {
               width: size / 2,
               child: Container(
                 decoration: BoxDecoration(
-                  color: Colors.blue,
                   borderRadius: BorderRadius.only(
                     topLeft: Radius.circular(size / 2),
                     bottomLeft: Radius.circular(size / 2),
                   ),
+                  border: Border(
+                    left: BorderSide(color: Colors.blue, width: 4),
+                    top: BorderSide(color: Colors.blue, width: 4),
+                    bottom: BorderSide(color: Colors.blue, width: 4),
+                  ),
                 ),
               ),
             ),
-            // Right half - Red
+            // Right half - Red border
             Positioned(
               right: 0,
               top: 0,
@@ -1897,19 +1902,16 @@ class _HomePageState extends State<HomePage> {
               width: size / 2,
               child: Container(
                 decoration: BoxDecoration(
-                  color: Colors.red,
                   borderRadius: BorderRadius.only(
                     topRight: Radius.circular(size / 2),
                     bottomRight: Radius.circular(size / 2),
                   ),
+                  border: Border(
+                    right: BorderSide(color: Colors.red, width: 4),
+                    top: BorderSide(color: Colors.red, width: 4),
+                    bottom: BorderSide(color: Colors.red, width: 4),
+                  ),
                 ),
-              ),
-            ),
-            // Border circle
-            Container(
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                border: Border.all(color: Colors.white, width: 2),
               ),
             ),
           ],

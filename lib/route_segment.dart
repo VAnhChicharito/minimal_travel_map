@@ -11,6 +11,8 @@ enum LineStyle { solid, dashed }
 
 enum TransportMode { none, plane, car, motorcycle, bus, train, walking }
 
+enum MarkerStyle { solid, halfBlueRed }
+
 IconData transportIconData(TransportMode mode) {
   switch (mode) {
     case TransportMode.plane:
@@ -55,6 +57,7 @@ class RouteSegment {
   bool swapLabelIcon;
   bool showStartLabel;
   bool showEndLabel;
+  MarkerStyle markerStyle;
 
   RouteSegment({
     required this.id,
@@ -78,6 +81,7 @@ class RouteSegment {
     this.swapLabelIcon = false,
     this.showStartLabel = true,
     this.showEndLabel = true,
+    this.markerStyle = MarkerStyle.solid,
   });
 
   LatLng get effectiveStartPosition =>

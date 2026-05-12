@@ -1162,6 +1162,35 @@ class _HomePageState extends State<HomePage> {
                       color: Colors.grey.shade600)),
               Row(
                 children: [
+                  Text('Kiểu marker: ',
+                      style: const TextStyle(fontSize: 12)),
+                  Expanded(
+                    child: SegmentedButton<MarkerStyle>(
+                      segments: const [
+                        ButtonSegment(value: MarkerStyle.solid, label: Text('Đơn')),
+                        ButtonSegment(value: MarkerStyle.halfBlueRed, label: Text('Nửa')),
+                      ],
+                      selected: <MarkerStyle>{seg.markerStyle},
+                      onSelectionChanged: (Set<MarkerStyle> newSelection) {
+                        setState(() => seg.markerStyle = newSelection.first);
+                      },
+                      style: ButtonStyle(
+                        backgroundColor: WidgetStateProperty.resolveWith<Color?>(
+                          (Set<WidgetState> states) {
+                            if (states.contains(WidgetState.selected)) {
+                              return const Color(0xFFF0FDF4);
+                            }
+                            return Colors.grey.shade100;
+                          },
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Row(
+                children: [
                   Text('Cỡ điểm: ${seg.markerSize.toInt()}  ',
                       style: const TextStyle(fontSize: 12)),
                   Expanded(
@@ -1651,7 +1680,7 @@ class _HomePageState extends State<HomePage> {
       case TransportMode.plane:
         return 'Plane';
       case TransportMode.car:
-        return 'Car';
+        return 'Private Car';
       case TransportMode.motorcycle:
         return 'Motorcycle';
       case TransportMode.bus:
@@ -1827,18 +1856,80 @@ class _HomePageState extends State<HomePage> {
                   Shadow(color: Colors.white, blurRadius: 4)
                 ])));
 
-    Widget iconWidget = Container(
-      width: size,
-      height: size,
-      decoration: BoxDecoration(
-        color: Colors.white,
-        shape: BoxShape.circle,
-        border: Border.all(color: borderColor, width: 4),
-        boxShadow: const [
-          BoxShadow(color: Colors.black26, blurRadius: 4, offset: Offset(0, 2))
-        ],
-      ),
-    );
+    // Find the route segment to get marker style
+    final seg = _routes.firstWhere((r) => r.startCity.name == waypoint.name || r.endCity.name == waypoint.name, orElse: () => _routes.first);
+    
+    Widget iconWidget;
+    if (seg.markerStyle == MarkerStyle.halfBlueRed) {
+      // Half blue (left) and half red (right) circle
+      iconWidget = Container(
+        width: size,
+        height: size,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          boxShadow: const [
+            BoxShadow(color: Colors.black26, blurRadius: 4, offset: Offset(0, 2))
+          ],
+        ),
+        child: Stack(
+          children: [
+            // Left half - Blue
+            Positioned(
+              left: 0,
+              top: 0,
+              bottom: 0,
+              width: size / 2,
+              child: Container(
+                decoration: BoxDecoration(
+                  color: Colors.blue,
+                  borderRadius: BorderRadius.only(
+                    topLeft: Radius.circular(size / 2),
+                    bottomLeft: Radius.circular(size / 2),
+                  ),
+                ),
+              ),
+            ),
+            // Right half - Red
+            Positioned(
+              right: 0,
+              top: 0,
+              bottom: 0,
+              width: size / 2,
+              child: Container(
+                decoration: BoxDecoration(
+                  color: Colors.red,
+                  borderRadius: BorderRadius.only(
+                    topRight: Radius.circular(size / 2),
+                    bottomRight: Radius.circular(size / 2),
+                  ),
+                ),
+              ),
+            ),
+            // Border circle
+            Container(
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                border: Border.all(color: Colors.white, width: 2),
+              ),
+            ),
+          ],
+        ),
+      );
+    } else {
+      // Original solid circle
+      iconWidget = Container(
+        width: size,
+        height: size,
+        decoration: BoxDecoration(
+          color: Colors.white,
+          shape: BoxShape.circle,
+          border: Border.all(color: borderColor, width: 4),
+          boxShadow: const [
+            BoxShadow(color: Colors.black26, blurRadius: 4, offset: Offset(0, 2))
+          ],
+        ),
+      );
+    }
 
     return Marker(
         point: position,

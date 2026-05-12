@@ -1,0 +1,17 @@
+/.dart_tool/
+/.flutter-plugins
+/.flutter-plugins-dependencies
+/.packages
+/pubspec.lock
+/.vscode/
+/.idea/
+*.iml
+.DS_Store
+/build/
+/web/
+/lib/
+/test/
+/*.yaml
+/*.json
+!pubspec.yaml
+!pubspec.lock

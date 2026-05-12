@@ -1175,9 +1175,9 @@ class _HomePageState extends State<HomePage> {
                         setState(() => seg.markerStyle = newSelection.first);
                       },
                       style: ButtonStyle(
-                        backgroundColor: WidgetStateProperty.resolveWith<Color?>(
-                          (Set<WidgetState> states) {
-                            if (states.contains(WidgetState.selected)) {
+                        backgroundColor: MaterialStateProperty.resolveWith<Color?>(
+                          (Set<MaterialState> states) {
+                            if (states.contains(MaterialState.selected)) {
                               return const Color(0xFFF0FDF4);
                             }
                             return Colors.grey.shade100;
